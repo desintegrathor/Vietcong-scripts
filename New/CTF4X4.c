@@ -13,7 +13,7 @@
 
 #define ONGROUND_MAXTIME		30.0f
 
-#define MIN_PLAYERS_PER_TEAM	4			// Minimum players per team (bots fill the gaps)
+#define MIN_PLAYERS_PER_TEAM	6			// Minimum players per team (bots fill the gaps)
 
 #define REC_WPNAME_US	"USSpawn%d"
 #define REC_WPNAME_VC	"VCSpawn%d"
@@ -366,37 +366,64 @@ void Check_ABL(dword pl_handle){
 }
 
 
-// Recover dead AI bots to fill teams up to MIN_PLAYERS_PER_TEAM
+// Recover dead/sleeping AI bots to fill teams up to MIN_PLAYERS_PER_TEAM
+// Counts ALL human players (alive + dead) to determine bot slots
 void RecoverAllDeadAi(void){
 	dword i, count, side;
 	s_SC_MP_EnumPlayers enum_pl[64];
-	dword alive_count[2] = {0, 0};
+	s_SC_P_getinfo info;
+	dword human_count[2] = {0, 0};
+	dword alive_bots[2] = {0, 0};
 	dword bots_to_recover[2];
 
 	count = 64;
 	if (SC_MP_EnumPlayers(enum_pl, &count, SC_MP_ENUMPLAYER_SIDE_ALL)){
-		// First pass: count alive players per side (humans + bots)
-		for (i = 0; i < count; i++){
-			side = enum_pl[i].side;
-			if (side < 2 && enum_pl[i].status == SC_MP_P_STATUS_INGAME){
-				alive_count[side]++;
-			}
-		}
-
-		// Calculate how many bots to recover per side
-		bots_to_recover[0] = (alive_count[0] < MIN_PLAYERS_PER_TEAM) ?
-							(MIN_PLAYERS_PER_TEAM - alive_count[0]) : 0;
-		bots_to_recover[1] = (alive_count[1] < MIN_PLAYERS_PER_TEAM) ?
-							(MIN_PLAYERS_PER_TEAM - alive_count[1]) : 0;
-
-		// Second pass: recover dead bots up to the limit
+		// First pass: count players per side
 		for (i = 0; i < count; i++){
 			side = enum_pl[i].side;
 			if (side >= 2) continue;
 
-			if (enum_pl[i].status == SC_MP_P_STATUS_INGAMEDEATH){
+			SC_P_GetInfo(enum_pl[i].id, &info);
+
+			// Handle NOTINGAME players
+			if (enum_pl[i].status == SC_MP_P_STATUS_NOTINGAME){
+				// Don't count NOTINGAME humans - they might be counted elsewhere
+				// (e.g., still as INGAMEDEATH on old side while switching)
+				// AI not in game - will be recovered below if needed
+				continue;
+			}
+
+			// Count ALL human players (alive or dead) - they occupy a slot
+			// Dead humans will respawn, so they still "reserve" their slot
+			if (info.member_id == 0){
+				human_count[side]++;
+			}
+
+			// Count only ALIVE BOTS (not humans, not dead bots)
+			if (info.member_id != 0 && enum_pl[i].status == SC_MP_P_STATUS_INGAME){
+				alive_bots[side]++;
+			}
+		}
+
+		// Calculate how many bots to recover per side
+		// max_bots = how many bot slots are available (4 - humans)
+		// bots_to_recover = how many bots are missing (max_bots - alive_bots)
+		for (i = 0; i < 2; i++){
+			dword max_bots = (human_count[i] >= MIN_PLAYERS_PER_TEAM) ? 0 : (MIN_PLAYERS_PER_TEAM - human_count[i]);
+			bots_to_recover[i] = (alive_bots[i] < max_bots) ? (max_bots - alive_bots[i]) : 0;
+		}
+
+		// Second pass: recover dead/sleeping bots up to the limit
+		for (i = 0; i < count; i++){
+			side = enum_pl[i].side;
+			if (side >= 2) continue;
+
+			// Check for dead or sleeping bots (NOTINGAME = not yet spawned)
+			if (enum_pl[i].status == SC_MP_P_STATUS_INGAMEDEATH ||
+				enum_pl[i].status == SC_MP_P_STATUS_NOTINGAME){
+
 				if (bots_to_recover[side] > 0){
-					// Try to recover - returns TRUE only for AI players
+					// SC_MP_RecoverAiPlayer returns TRUE only for AI players
 					if (SC_MP_RecoverAiPlayer(enum_pl[i].id, NULL, 0.0f)){
 						bots_to_recover[side]--;
 					}
@@ -499,7 +526,7 @@ int ScriptMain(s_SC_NET_info *info){
 						ResetMission();
 						SC_MP_SRV_InitGameAfterInactive();
 						SC_MP_RecoverAllNoAiPlayers();
-						SC_MP_RecoverAllAiPlayers();  // 4x4: Also recover AI players
+						RecoverAllDeadAi();  // 4x4: Recover only needed AI players
 						gMission_starting_timer = 8.0f;
 					}
 				}// if ((side[0])&&(side[1]))
@@ -521,8 +548,6 @@ int ScriptMain(s_SC_NET_info *info){
 				}// else if ((side[0])&&(side[1]))
 
 			}// if (SC_MP_EnumPlayers(enum_pl,&j,SC_MP_ENUMPLAYER_SIDE_ALL))
-
-
 
 			for (j=0;j<2;j++)
 			for (i=0;i<gRecs[j];i++)
@@ -843,8 +868,8 @@ int ScriptMain(s_SC_NET_info *info){
 			gTime = 0.0f;
 
 			// 4x4: Initialize bot counts
-			SC_sgi(GVAR_BOTCOUNT_US, 4);
-			SC_sgi(GVAR_BOTCOUNT_VC, 4);
+			SC_sgi(GVAR_BOTCOUNT_US, MIN_PLAYERS_PER_TEAM);
+			SC_sgi(GVAR_BOTCOUNT_VC, MIN_PLAYERS_PER_TEAM);
 
 			SC_MP_EnableBotsFromScene(TRUE);  // 4x4: Enable bots
 
@@ -935,8 +960,8 @@ int ScriptMain(s_SC_NET_info *info){
 					SC_Log(3,"difficulty setting is %d",SC_ggi(SGI_DIFFICULTY));
 
 					// 4x4: Set bot counts
-					SC_sgi(GVAR_BOTCOUNT_US, 4);
-					SC_sgi(GVAR_BOTCOUNT_VC, 4);
+					SC_sgi(GVAR_BOTCOUNT_US, MIN_PLAYERS_PER_TEAM);
+					SC_sgi(GVAR_BOTCOUNT_VC, MIN_PLAYERS_PER_TEAM);
 
 					SC_MP_Gvar_SetSynchro(GVAR_SIDE0POINTS);
 					SC_MP_Gvar_SetSynchro(GVAR_SIDE1POINTS);
